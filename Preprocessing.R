@@ -8,9 +8,9 @@ df_raw = read.csv("./Data/abcd_resilient_Longitudinal_v5.1_20250903.csv")|>
                      x = src_subject_id,
                      replacement = ""))
 
-getwd()
 df_imaging = read.csv("/Users/luchen/Documents/Xi/SuStaIn/Data/ABCD_3T1_betnet_baseline_ACE(complete)_participants_CBCL_withQC_merged.csv")|>
-  filter(if_all(c(rsfmri_c_ngd_ad_ngd_ad, age, sex), ~ !is.na(.)))
+  filter(if_all(c(age, sex), ~ !is.na(.)))|>
+  filter(if_all(starts_with("rsfmri_"), ~ !is.na(.)))
 
 df_raw |> 
   group_by(eventname)|>
@@ -24,6 +24,9 @@ df_base|>
   summarise(cnt = n())
 ## need to double check the NA (n = 4)
 ## "NDARINV9PVR76W7" "NDARINVJHJDGEFN" "NDARINVL9NUBDAN" "NDARINVTRG5GX9T"
+
+df_base = df_base |>
+  filter(!is.na(Resilience_Group))
 #### Combat for age and sex  #####
 feature_matrix = df_base|>select(starts_with("rsfmri"))
 
@@ -39,7 +42,6 @@ df_base = df_base|>
   cbind(harmonized_data)|>
   select(SubID,Resilience_Group,
          matches("^(cbcl_|nihtbx|rsfmri_)"))
-
 
 save(df_base,
      file = "./Data/ABCD_Resilience_preprocessed_1012.RData")

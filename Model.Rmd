@@ -1,0 +1,67 @@
+---
+title: "Models"
+author: "Yumeng Qi"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    toc_depth: 2
+---
+
+```{r setup, include=FALSE, message=FALSE, warning = FALSE}
+knitr::opts_chunk$set(echo = TRUE,message=FALSE, warning=FALSE)
+
+library(tidyverse)
+library(patchwork)
+library(knitr)
+library(kableExtra)
+library(caret)
+library(nnet)
+library(ranger)
+library(xgboost)
+
+theme_set(theme_bw() + theme(text = element_text("serif"), panel.grid = element_blank()))
+```
+
+# Load Data
+```{r}
+load("./Data/ABCD_Resilience_preprocessed_1012.RData")
+df_base = df_base|>
+  mutate(Resilience_Group = factor(Resilience_Group,
+                                   levels = c("Competent", "Maladaptive","Resilient", "Vulnerable"),
+                                   labels = c("X0", "X1", "X2", "X3")))
+```
+# Train-test Split
+
+```{r}
+set.seed(42)
+train_idx = createDataPartition(df_base|>pull(Resilience_Group), p = 0.7, list = FALSE)
+train_data = df_base[train_idx, ]|>
+  select(starts_with("rsfmri_"), Resilience_Group)
+test_data  = df_base[-train_idx, ]|>
+  select(starts_with("rsfmri_"), Resilience_Group)
+
+# Define training control
+trainControl = trainControl(
+  method = "cv", number = 5,     # Cross-validation
+  classProbs = TRUE,             # Needed for AUC/multiclass probs
+  summaryFunction = multiClassSummary,
+  verboseIter = TRUE             # Show progress
+)
+```
+
+# Build Models
+
+```{r}
+grid_nnet <- expand.grid(size = c(3, 5, 7),
+                         decay = c(0, 0.1, 0.5))
+
+model_nnet <- train(
+  Resilience_Group ~ ., data = train_data,
+  method = "nnet",
+  trControl = trainControl,
+  trace = FALSE,
+  tuneGrid = grid_nnet
+)
+```
