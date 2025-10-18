@@ -1,5 +1,5 @@
 ---
-title: "Models"
+title: "Models (Resilient & Vulnerable)"
 author: "Yumeng Qi"
 output:
   html_document:
@@ -20,48 +20,366 @@ library(caret)
 library(nnet)
 library(ranger)
 library(xgboost)
+library(pROC)
+library(doParallel)
 
 theme_set(theme_bw() + theme(text = element_text("serif"), panel.grid = element_blank()))
 ```
 
 # Load Data
+
+
 ```{r}
 load("./Data/ABCD_Resilience_preprocessed_1012.RData")
 df_base = df_base|>
+  filter(Resilience_Group %in% c("Resilient", "Vulnerable"))|>
   mutate(Resilience_Group = factor(Resilience_Group,
-                                   levels = c("Competent", "Maladaptive","Resilient", "Vulnerable"),
-                                   labels = c("X0", "X1", "X2", "X3")))
+                                   levels = c("Resilient", "Vulnerable"),
+                                   labels = c("X1", "X0")))
+
+table(df_base$Resilience_Group)
 ```
+
 # Train-test Split
 
 ```{r}
 set.seed(42)
 train_idx = createDataPartition(df_base|>pull(Resilience_Group), p = 0.7, list = FALSE)
 train_data = df_base[train_idx, ]|>
-  select(starts_with("rsfmri_"), Resilience_Group)
+  select(starts_with("rsfmri_"),starts_with("smri_"), Resilience_Group)
 test_data  = df_base[-train_idx, ]|>
-  select(starts_with("rsfmri_"), Resilience_Group)
+  select(starts_with("rsfmri_"),starts_with("smri_"), Resilience_Group)
 
 # Define training control
 trainControl = trainControl(
-  method = "cv", number = 5,     # Cross-validation
+  method = "repeatedcv", 
+  repeats = 3,
+  number = 5,     # Cross-validation
   classProbs = TRUE,             # Needed for AUC/multiclass probs
-  summaryFunction = multiClassSummary,
-  verboseIter = TRUE             # Show progress
+  #summaryFunction = multiClassSummary,
+  summaryFunction = twoClassSummary,
+  sampling = "smote",
+  selectionFunction = "oneSE",
+  verboseIter = TRUE,             # Show progress
 )
+#class_weights = 1 / table(train_data$Resilience_Group)
+#weights_vec = class_weights[train_data$Resilience_Group]
 ```
+
+
 
 # Build Models
 
-```{r}
-grid_nnet <- expand.grid(size = c(3, 5, 7),
-                         decay = c(0, 0.1, 0.5))
+## Elastic Net
 
-model_nnet <- train(
-  Resilience_Group ~ ., data = train_data,
-  method = "nnet",
-  trControl = trainControl,
-  trace = FALSE,
-  tuneGrid = grid_nnet
+```{r,eval=FALSE}
+tune_grid = expand.grid(
+  alpha = seq(0, 1, length = 5),      # try different mix ratios
+  lambda = 10^seq(-3, -0.5, length = 20) # range of penalty strengths
 )
+
+fit_en =  train(Resilience_Group ~ ., 
+                data = train_data,
+                method = "glmnet",
+                tuneGrid = tune_grid,
+                trControl =  trainControl ,
+                preProcess = c("center", "scale"),
+                metric = "ROC")
+```
+
+
+
+```{r}
+ggplot(fit_en,highlight = T) + scale_x_continuous(transform = "log") + labs(title = "EN")
+```
+
+```{r}
+fit_en[["bestTune"]]
+fit_en[["resample"]]
+```
+
+## Random Forrest
+
+```{r}
+tuneGrid = expand.grid(
+  mtry = c(2,5,10),
+  splitrule = "gini",
+  min.node.size = c(10,20,30)
+)
+fit_rf = train(
+  Resilience_Group ~ ., data = train_data,
+  method = "ranger",
+  tuneGrid = tuneGrid,
+  trControl = trainControl,
+  importance = "impurity",
+  num.trees = 100,
+  #class_weights = weights_vec,
+  preProcess = c("center", "scale"),
+  max.depth = 10,
+  metric = "ROC"
+)
+```
+
+```{r}
+fit_rf[["bestTune"]]
+
+fit_rf[["resample"]]
+```
+
+```{r}
+best_model_index = which.max(fit_rf$results$AUC)
+fit_rf$results$mtry[best_model_index]
+fit_rf$results$min.node.size[best_model_index]
+
+ggplot(fit_rf, highlight = TRUE) + labs(title = "Random Forrest")
+rf_importance = varImp(fit_rf,scale = T)[["importance"]]
+rf_importance$Feature = rownames(rf_importance)
+colnames(rf_importance) = c("estimate","variable")
+
+rf_importance_plot = rf_importance |> 
+  filter(estimate != 0) |>
+  mutate(estimate = abs(estimate)) |>
+  arrange(desc(estimate)) |>
+  dplyr::slice(1:20)|>
+  ggplot(aes(x = fct_reorder(variable,estimate), y = estimate)) + 
+  geom_col() +
+  labs(x="", y="") +
+  coord_flip() +
+  labs(y="Relative Feature Importance", x="", title = "Random Forest") +
+  theme(legend.position = "none",
+        axis.text.y = element_text (angle = 0,size = 15),
+        axis.text.x = element_text (angle = 0,size = 10))
+rf_importance_plot
+```
+
+
+## SVM
+
+
+```{r}
+
+tune_grid <- expand.grid(
+  C = c(0.01, 0.1, 1, 10))
+
+# Train model
+fit_svm = train(
+  Resilience_Group ~ ., data = train_data,
+  method = "svmLinear",
+  trControl = trainControl,
+  tuneGrid = tune_grid,
+  metric = "ROC",
+  preProcess = c("center", "scale")
+)
+
+```
+
+```{r}
+fit_svm[['resample']]
+```
+
+```{r}
+library(e1071)
+best_model_index = which.max(fit_svm$results$ROC)
+fit_svm$results$C[best_model_index]
+ggplot(fit_svm, highlight = TRUE) + scale_x_continuous(transform = "log")  + labs(title = "SVM-Linear") 
+```
+
+
+
+```{r}
+writexl::write_xlsx(list(EN = fit_en[["resample"]],
+                         RF = fit_rf[["resample"]],
+                         SVM = fit_svm[["resample"]]),
+                    path = "./Data/resampling_auc.xlsx")
+```
+# Performance
+
+
+
+## Resampling
+
+```{r, post resample}
+model_name = c("en","rf","svm")
+model_name = paste0("fit_",model_name)
+tibble(model_name) |>
+  mutate(prediction = map(model_name,\(x) predict(get(x), train_data, type = "prob")),
+         dat = map(prediction, \(x) data.frame(obs = train_data$Resilience_Group,
+                                               pred = factor(x$X1 > 0.5,
+                                                             levels = c("FALSE", "TRUE"), 
+                                                             labels = c("X0", "X1")),
+                                               X0 = x$X0,
+                                               X1 = x$X1)),
+         post_resample = map(dat,\(x) twoClassSummary(dat = x, lev =  c("X0", "X1")))
+         )|>
+  unnest(post_resample) |>
+  select(model_name,post_resample) |>
+  mutate(metric = rep(c("ROC","Sens","Spec"), times = 3)) |>
+  pivot_wider(names_from = metric, values_from = post_resample)|>
+  kable(format = "html",
+        digits = 3, booktab = T, row.names = F, 
+        escape = F, align = "lccc") |>
+  kable_styling(latex_options = "hold_position")
+```
+
+```{r, post resample}
+model_name = c("en","rf","svm")
+model_name = paste0("fit_",model_name)
+tibble(model_name) |>
+  mutate(prediction = map(model_name,\(x) predict(get(x), test_data, type = "prob")),
+         dat = map(prediction, \(x) data.frame(obs = test_data$Resilience_Group,
+                                               pred = factor(x$X1 > 0.5,
+                                                             levels = c("FALSE", "TRUE"), 
+                                                             labels = c("X0", "X1")),
+                                               X0 = x$X0,
+                                               X1 = x$X1)),
+         post_resample = map(dat,\(x) twoClassSummary(dat = x, lev =  c("X0", "X1")))
+         )|>
+  unnest(post_resample) |>
+  select(model_name,post_resample) |>
+  mutate(metric = rep(c("ROC","Sens","Spec"), times = 3)) |>
+  pivot_wider(names_from = metric, values_from = post_resample)|>
+  kable(format = "html",
+        digits = 3, booktab = T, row.names = F, 
+        escape = F, align = "lccc") |>
+  kable_styling(latex_options = "hold_position")
+```
+### Train
+
+```{r}
+library(pROC)
+# Define your models in a named list
+model_list <- list(
+  en = fit_en,
+  rf = fit_rf,
+  svm = fit_svm
+  #xgb = fit_xgb
+)
+
+# Initialize empty lists to store results
+prob_list_bs <- list()
+roc_list_bs <- list()
+auc_list_bs <- list()
+
+# Loop through models
+for (model_name in names(model_list)) {
+  model <- model_list[[model_name]]
+  
+  # Predict probabilities for class 1
+  prob <- predict(model, newdata = train_data, type = "prob")[, 2]
+  prob_list_bs[[model_name]] <- prob
+  
+  # Generate ROC curve
+  roc_obj <- roc(train_data$Resilience_Group, prob)
+  roc_list_bs[[model_name]] <- roc_obj
+  
+  # Compute AUC
+  auc_list_bs[[model_name]] <- round(auc(roc_obj), 2)
+}
+
+library(paletteer)
+colors = as.character(paletteer::paletteer_d("fishualize::Balistapus_undulatus", n = 5))
+named_colors = c(
+  RF = colors[1],
+  SVM = colors[2],
+  EN = colors[3]
+)
+roc_list_named = setNames(
+  roc_list_bs,
+  c(
+    paste0("EN (AUC=", sprintf("%.2f", auc_list_bs[["en"]]), ")"),
+    paste0("SVM (AUC=", sprintf("%.2f", auc_list_bs[["svm"]]), ")"),
+    paste0("RF (AUC=", sprintf("%.2f", auc_list_bs[["rf"]]), ")")
+  )
+)
+
+named_colors = setNames(named_colors, 
+    c(
+    paste0("EN (AUC=", sprintf("%.2f", auc_list_bs[["en"]]), ")"),
+    paste0("SVM (AUC=", sprintf("%.2f", auc_list_bs[["svm"]]), ")"),
+    paste0("RF (AUC=", sprintf("%.2f", auc_list_bs[["rf"]]), ")")
+  )
+  )
+
+# Create an empty ggplot object
+auc_plot = ggroc(roc_list_named) +
+  ggtitle("ROC Curves on Internal Test Data") +
+  geom_abline(intercept = 1, slope = 1,
+              linetype = "dashed", color = "grey") +  # Add a diagonal line for reference
+  labs(x = "Specificity", y = "Sensitivity", color = "Model")+
+  scale_color_manual(values = named_colors) +
+ # scale_fill_manual(values = named_colors) +
+   theme(#legend.position = "none",
+        axis.text.y = element_text (angle = 0,size = 10),
+        axis.text.x = element_text (angle = 0,size = 10),
+        legend.position = c(0.95, 0.05),
+        legend.justification = c("right", "bottom"))
+
+auc_plot
+#ggsave(filename = "./plot/auc_test.png", plot = auc_plot, dpi = 800, width = 6, height = 4)
+```
+
+
+### Test
+
+```{r}
+# Initialize empty lists to store results
+prob_list_bs <- list()
+roc_list_bs <- list()
+auc_list_bs <- list()
+
+# Loop through models
+for (model_name in names(model_list)) {
+  model <- model_list[[model_name]]
+  
+  # Predict probabilities for class 1
+  prob <- predict(model, newdata = test_data, type = "prob")[, 2]
+  prob_list_bs[[model_name]] <- prob
+  
+  # Generate ROC curve
+  roc_obj <- roc(test_data$Resilience_Group, prob)
+  roc_list_bs[[model_name]] <- roc_obj
+  
+  # Compute AUC
+  auc_list_bs[[model_name]] <- round(auc(roc_obj), 2)
+}
+
+colors = as.character(paletteer::paletteer_d("fishualize::Balistapus_undulatus", n = 5))
+named_colors = c(
+  RF = colors[1],
+  SVM = colors[2],
+  EN = colors[3]
+)
+roc_list_named = setNames(
+  roc_list_bs,
+  c(
+    paste0("EN (AUC=", sprintf("%.2f", auc_list_bs[["en"]]), ")"),
+    paste0("SVM (AUC=", sprintf("%.2f", auc_list_bs[["svm"]]), ")"),
+    paste0("RF (AUC=", sprintf("%.2f", auc_list_bs[["rf"]]), ")")
+  )
+)
+
+named_colors = setNames(named_colors, 
+    c(
+    paste0("EN (AUC=", sprintf("%.2f", auc_list_bs[["en"]]), ")"),
+    paste0("SVM (AUC=", sprintf("%.2f", auc_list_bs[["svm"]]), ")"),
+    paste0("RF (AUC=", sprintf("%.2f", auc_list_bs[["rf"]]), ")")
+  )
+  )
+
+# Create an empty ggplot object
+auc_plot = ggroc(roc_list_named) +
+  ggtitle("ROC Curves on Test Data") +
+  geom_abline(intercept = 1, slope = 1,
+              linetype = "dashed", color = "grey") +  # Add a diagonal line for reference
+  labs(x = "Specificity", y = "Sensitivity", color = "Model")+
+  scale_color_manual(values = named_colors) +
+ # scale_fill_manual(values = named_colors) +
+   theme(#legend.position = "none",
+        axis.text.y = element_text (angle = 0,size = 10),
+        axis.text.x = element_text (angle = 0,size = 10),
+        legend.position = c(0.95, 0.05),
+        legend.justification = c("right", "bottom"))
+
+auc_plot
+#ggsave(filename = "./plot/auc_test.png", plot = auc_plot, dpi = 800, width = 6, height = 4)
 ```

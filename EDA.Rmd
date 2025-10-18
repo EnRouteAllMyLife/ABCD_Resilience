@@ -1,0 +1,132 @@
+---
+title: "Feature Selection"
+author: "Yumeng Qi"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    toc_depth: 2
+---
+
+```{r setup, include=FALSE, message=FALSE, warning = FALSE}
+knitr::opts_chunk$set(echo = TRUE,message=FALSE, warning=FALSE)
+
+library(tidyverse)
+library(caret)
+
+
+theme_set(theme_bw() + theme(text = element_text("serif"), panel.grid = element_blank()))
+```
+
+# Load Data
+
+
+```{r}
+load("./Data/ABCD_Resilience_preprocessed_1012.RData")
+df_base = df_base|>
+  filter(Resilience_Group %in% c("Resilient", "Vulnerable"))|>
+  mutate(Resilience_Group = factor(Resilience_Group,
+                                   levels = c("Resilient", "Vulnerable"),
+                                   labels = c("X1", "X0")))
+
+table(df_base$Resilience_Group)
+```
+
+
+# T-tests
+
+
+## fmri
+
+```{r}
+fmri_cols = colnames(df_base|>select(starts_with("rsfmr")))
+df_result_fmri = data.frame()
+for (i in fmri_cols){
+  x = df_base|> filter(Resilience_Group == "X0")|>pull(i)
+  y = df_base|> filter(Resilience_Group == "X1")|>pull(i)
+  t_result = t.test(x, y)
+  df_result_fmri = rbind(df_result_fmri,
+                    c(i,
+                      mean(x),sd(x),
+                      mean(y),sd(y),
+                      t_result[["p.value"]]))
+}
+colnames(df_result_fmri) = c("ROI","Avg_V","SD_V","Avg_R","SD_R","p")
+df_result_fmri = df_result_fmri |>
+  mutate(across(c(Avg_V,SD_V,Avg_R,SD_R,p), ~as.numeric(.)))|>
+  mutate(`vulnerable(mean,sd)` = sprintf("%.2f (%.2f)", Avg_V, SD_V),
+         `resilient(mean,sd)` = sprintf("%.2f (%.2f)", Avg_R, SD_R),
+         p = if_else(p<0.001, "<0.001",sprintf("%.3f",p)))|>
+  select(ROI,`vulnerable(mean,sd)`,`resilient(mean,sd)`,p)
+df_result_fmri
+```
+
+
+## mri
+
+```{r}
+mri_cols = colnames(df_base|>select(starts_with("smri")))
+
+df_result_mri = data.frame()
+
+for (i in mri_cols){
+  x = df_base|> filter(Resilience_Group == "X0")|>pull(i)
+  y = df_base|> filter(Resilience_Group == "X1")|>pull(i)
+  t_result = t.test(x, y)
+  df_result_mri = rbind(df_result_mri,
+                    c(i,
+                      mean(x),sd(x),
+                      mean(y),sd(y),
+                      t_result[["p.value"]]))
+}
+
+colnames(df_result_mri) = c("ROI","Avg_V","SD_V","Avg_R","SD_R","p")
+df_result_mri = df_result_mri |>
+  mutate(across(c(Avg_V,SD_V,Avg_R,SD_R,p), ~as.numeric(.)))|>
+  mutate(`vulnerable(mean,sd)` = sprintf("%.2f (%.2f)", Avg_V, SD_V),
+         `resilient(mean,sd)` = sprintf("%.2f (%.2f)", Avg_R, SD_R),
+         p = if_else(p<0.001, "<0.001",sprintf("%.3f",p)))|>
+  select(ROI,`vulnerable(mean,sd)`,`resilient(mean,sd)`,p)
+df_result_mri
+```
+
+```{r}
+writexl::write_xlsx(list(fmri = df_result_fmri,
+                         smri = df_result_mri),
+                    path = "./Data/ttest.xlsx")
+
+
+```
+# Train-test Split
+
+```{r}
+set.seed(42)
+train_idx = createDataPartition(df_base|>pull(Resilience_Group), p = 0.7, list = FALSE)
+train_data = df_base[train_idx, ]|>
+  select(starts_with("rsfmri_"),starts_with("smri_"), Resilience_Group)
+test_data  = df_base[-train_idx, ]|>
+  select(starts_with("rsfmri_"),starts_with("smri_"), Resilience_Group)
+
+# Define training control
+trainControl = trainControl(
+  method = "repeatedcv", 
+  repeats = 3,
+  number = 5,     # Cross-validation
+  classProbs = TRUE,             # Needed for AUC/multiclass probs
+  #summaryFunction = multiClassSummary,
+  summaryFunction = twoClassSummary,
+  sampling = "smote",
+  selectionFunction = "oneSE",
+  verboseIter = TRUE,             # Show progress
+)
+#class_weights = 1 / table(train_data$Resilience_Group)
+#weights_vec = class_weights[train_data$Resilience_Group]
+```
+
+
+```{r}
+nzv = nearZeroVar(train_data, saveMetrics = TRUE)
+sum(nzv$zeroVar)
+```
+
